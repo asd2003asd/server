@@ -4936,6 +4936,66 @@ if (typeof Object.create === 'function') {
 
 /***/ }),
 
+/***/ 3538:
+/***/ ((module) => {
+
+"use strict";
+
+
+function genWrap (wraps, ref, fn, event) {
+  function wrap () {
+    const obj = ref.deref()
+    // This should alway happen, however GC is
+    // undeterministic so it might happen.
+    /* istanbul ignore else */
+    if (obj !== undefined) {
+      fn(obj, event)
+    }
+  }
+
+  wraps[event] = wrap
+  process.once(event, wrap)
+}
+
+const registry = new FinalizationRegistry(clear)
+const map = new WeakMap()
+
+function clear (wraps) {
+  process.removeListener('exit', wraps.exit)
+  process.removeListener('beforeExit', wraps.beforeExit)
+}
+
+function register (obj, fn) {
+  if (obj === undefined) {
+    throw new Error('the object can\'t be undefined')
+  }
+  const ref = new WeakRef(obj)
+
+  const wraps = {}
+  map.set(obj, wraps)
+  registry.register(obj, wraps)
+
+  genWrap(wraps, ref, fn, 'exit')
+  genWrap(wraps, ref, fn, 'beforeExit')
+}
+
+function unregister (obj) {
+  const wraps = map.get(obj)
+  map.delete(obj)
+  if (wraps) {
+    clear(wraps)
+  }
+  registry.unregister(obj)
+}
+
+module.exports = {
+  register,
+  unregister
+}
+
+
+/***/ }),
+
 /***/ 5962:
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
@@ -5955,7 +6015,7 @@ function getPrettyStream (opts, prettifier, dest, instance) {
     return prettifierMetaWrapper(prettifier(opts), dest, opts)
   }
   try {
-    const prettyFactory = (__webpack_require__(1361).prettyFactory) || __webpack_require__(1361)
+    const prettyFactory = (__webpack_require__(6535).prettyFactory) || __webpack_require__(6535)
     prettyFactory.asMetaWrapper = prettifierMetaWrapper
     return prettifierMetaWrapper(prettyFactory(opts), dest, opts)
   } catch (e) {
@@ -14394,6 +14454,14 @@ module.exports = require("vm");
 
 /***/ }),
 
+/***/ 1267:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("worker_threads");
+
+/***/ }),
+
 /***/ 9796:
 /***/ ((module) => {
 
@@ -14625,7 +14693,7 @@ exports.yellowBright = yellowBright;
 
 /***/ }),
 
-/***/ 1361:
+/***/ 6535:
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
@@ -14635,11 +14703,9 @@ const { isColorSupported } = __webpack_require__(799)
 const pump = __webpack_require__(2181)
 const { Transform } = __webpack_require__(8118)
 const abstractTransport = __webpack_require__(2306)
-const sonic = __webpack_require__(6755)
 const sjs = __webpack_require__(9316)
-
-const colors = __webpack_require__(4067)
-const { ERROR_LIKE_KEYS, MESSAGE_KEY, TIMESTAMP_KEY, LEVEL_KEY, LEVEL_NAMES } = __webpack_require__(4762)
+const colors = __webpack_require__(699)
+const { ERROR_LIKE_KEYS, MESSAGE_KEY, TIMESTAMP_KEY, LEVEL_KEY, LEVEL_NAMES } = __webpack_require__(9807)
 const {
   isObject,
   prettifyErrorLog,
@@ -14648,8 +14714,9 @@ const {
   prettifyMetadata,
   prettifyObject,
   prettifyTime,
+  buildSafeSonicBoom,
   filterLog
-} = __webpack_require__(6213)
+} = __webpack_require__(6237)
 
 const jsonParser = input => {
   try {
@@ -14858,7 +14925,7 @@ function build (opts = {}) {
     if (typeof opts.destination === 'object' && typeof opts.destination.write === 'function') {
       destination = opts.destination
     } else {
-      destination = sonic({
+      destination = buildSafeSonicBoom({
         dest: opts.destination || 1,
         append: opts.append,
         mkdir: opts.mkdir,
@@ -14883,13 +14950,13 @@ module.exports["default"] = build
 
 /***/ }),
 
-/***/ 4067:
+/***/ 699:
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
 
 
-const { LEVELS, LEVEL_NAMES } = __webpack_require__(4762)
+const { LEVELS, LEVEL_NAMES } = __webpack_require__(9807)
 
 const nocolor = input => input
 const plain = {
@@ -14999,7 +15066,7 @@ module.exports = function getColorizer (useColors = false, customColors) {
 
 /***/ }),
 
-/***/ 4762:
+/***/ 9807:
 /***/ ((module) => {
 
 "use strict";
@@ -15052,7 +15119,7 @@ module.exports = {
 
 /***/ }),
 
-/***/ 6213:
+/***/ 6237:
 /***/ ((module, __unused_webpack_exports, __webpack_require__) => {
 
 "use strict";
@@ -15060,8 +15127,10 @@ module.exports = {
 
 const clone = __webpack_require__(3268)({ circles: true })
 const dateformat = __webpack_require__(924)
+const SonicBoom = __webpack_require__(6755)
 const stringifySafe = __webpack_require__(2988)
-const defaultColorizer = __webpack_require__(4067)()
+const { isMainThread } = __webpack_require__(1267)
+const defaultColorizer = __webpack_require__(699)()
 const {
   DATE_FORMAT,
   ERROR_LIKE_KEYS,
@@ -15071,7 +15140,7 @@ const {
   TIMESTAMP_KEY,
   LOGGER_KEYS,
   LEVELS
-} = __webpack_require__(4762)
+} = __webpack_require__(9807)
 
 module.exports = {
   isObject,
@@ -15081,6 +15150,7 @@ module.exports = {
   prettifyMetadata,
   prettifyObject,
   prettifyTime,
+  buildSafeSonicBoom,
   filterLog
 }
 
@@ -15639,6 +15709,70 @@ function filterLog (log, ignoreKeys) {
   return logCopy
 }
 
+function noop () {}
+
+/**
+ * Creates a safe SonicBoom instance
+ *
+ * @param {object} opts Options for SonicBoom
+ *
+ * @returns {object} A new SonicBoom stream
+ */
+function buildSafeSonicBoom (opts) {
+  const stream = new SonicBoom(opts)
+  stream.on('error', filterBrokenPipe)
+  // if we are sync: false, we must flush on exit
+  if (!opts.sync && isMainThread) {
+    setupOnExit(stream)
+  }
+  return stream
+
+  function filterBrokenPipe (err) {
+    if (err.code === 'EPIPE') {
+      stream.write = noop
+      stream.end = noop
+      stream.flushSync = noop
+      stream.destroy = noop
+      return
+    }
+    stream.removeListener('error', filterBrokenPipe)
+  }
+}
+
+function setupOnExit (stream) {
+  /* istanbul ignore next */
+  if (global.WeakRef && global.WeakMap && global.FinalizationRegistry) {
+    // This is leak free, it does not leave event handlers
+    const onExit = __webpack_require__(3538)
+
+    onExit.register(stream, autoEnd)
+
+    stream.on('close', function () {
+      onExit.unregister(stream)
+    })
+  }
+}
+
+/* istanbul ignore next */
+function autoEnd (stream, eventName) {
+  // This check is needed only on some platforms
+
+  if (stream.destroyed) {
+    return
+  }
+
+  if (eventName === 'beforeExit') {
+    // We still have an event loop, let's use it
+    stream.flush()
+    stream.on('drain', function () {
+      stream.end()
+    })
+  } else {
+    // We do not have an event loop, so flush synchronously
+    stream.flushSync()
+  }
+}
+
 
 /***/ }),
 
@@ -16074,7 +16208,7 @@ module.exports = JSON.parse('{"name":"pino","version":"6.14.0","description":"su
 /***/ ((module) => {
 
 "use strict";
-module.exports = JSON.parse('{"name":"@unblockneteasemusic/server","version":"0.27.0-rc.6","description":"Revive unavailable songs for Netease Cloud Music","main":"src/provider/match.js","bin":{"unblockneteasemusic":"./precompiled/app.js"},"engines":{"node":">= 12"},"scripts":{"build":"webpack","pkg":"pkg . --out-path=dist/","test":"jest"},"pkg":{"assets":["server.key","server.crt"],"targets":["node16-linux-arm64","node16-win-arm64","node16-linux-x64","node16-win-x64"],"outputPath":"dist"},"repository":{"type":"git","url":"https://github.com/UnblockNeteaseMusic/server.git"},"author":"nondanee, 1715173329, pan93412","license":"LGPL-3.0-only","dependencies":{"node-windows":"^1.0.0-beta.6","pino":"6.14.0","pino-pretty":"^7.5.3"},"devDependencies":{"@swc/core":"^1.2.155","@types/node":"^17.0.21","@types/pino":"6.3.12","browserslist":"^4.20.0","core-js":"^3.21.1","jest":"^27.5.1","pkg":"^5.5.2","prettier":"^2.5.1","swc-loader":"^0.1.15","typescript":"^4.6.2","webpack":"^5.70.0","webpack-cli":"^4.9.2"},"publishConfig":{"access":"public"},"packageManager":"yarn@3.1.1"}');
+module.exports = JSON.parse('{"name":"@unblockneteasemusic/server","version":"0.27.0-rc.6","description":"Revive unavailable songs for Netease Cloud Music","main":"src/provider/match.js","bin":{"unblockneteasemusic":"./precompiled/app.js"},"engines":{"node":">= 12"},"scripts":{"build":"webpack","pkg":"pkg . --out-path=dist/","test":"jest"},"pkg":{"assets":["server.key","server.crt"],"targets":["node16-linux-arm64","node16-win-arm64","node16-linux-x64","node16-win-x64"],"outputPath":"dist"},"repository":{"type":"git","url":"https://github.com/UnblockNeteaseMusic/server.git"},"author":"nondanee, 1715173329, pan93412","license":"LGPL-3.0-only","dependencies":{"node-windows":"^1.0.0-beta.7","pino":"6.14.0","pino-pretty":"^7.5.4"},"devDependencies":{"@swc/core":"^1.2.160","@types/node":"^17.0.23","@types/pino":"6.3.12","browserslist":"^4.20.2","core-js":"^3.21.1","jest":"^27.5.1","pkg":"^5.5.2","prettier":"^2.6.0","swc-loader":"^0.1.15","typescript":"^4.6.2","webpack":"^5.70.0","webpack-cli":"^4.9.2"},"publishConfig":{"access":"public"},"packageManager":"yarn@3.1.1"}');
 
 /***/ })
 
